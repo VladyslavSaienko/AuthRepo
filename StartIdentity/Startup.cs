@@ -3,33 +3,40 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.EntityFrameworkCore;
+using System.Reflection;
+using IdentityServer4.EntityFramework.DbContexts;
+using IdentityServer4.EntityFramework.Mappers;
+using System.Linq;
 
 namespace StartIdentity
 {
     public class Startup
     {
-        public Startup(ILoggerFactory loggerFactory)
-        {
-            loggerFactory.AddConsole(LogLevel.Debug);
-        }
 
         public void ConfigureServices(IServiceCollection services)
         {
             services.AddMvc();
 
-            // configure identity server with in-memory stores, keys, clients and scopes
+            var connectionString = @"server=(localdb)\mssqllocaldb;database=DataStore;trusted_connection=yes";
+            var migrationsAssembly = typeof(Startup).GetTypeInfo().Assembly.GetName().Name;
+
+            // configure identity server with in-memory users, but EF stores for clients and resources
             services.AddIdentityServer()
                 .AddTemporarySigningCredential()
-                .AddInMemoryIdentityResources(Config.GetIdentityResources())
-                .AddInMemoryApiResources(Config.GetApiResources())
-                .AddInMemoryClients(Config.GetClients())
-                .AddTestUsers(Config.GetUsers());
+                .AddTestUsers(Config.GetUsers())
+                .AddConfigurationStore(builder =>
+                    builder.UseSqlServer(connectionString, options =>
+                        options.MigrationsAssembly(migrationsAssembly)))
+                .AddOperationalStore(builder =>
+                    builder.UseSqlServer(connectionString, options =>
+                        options.MigrationsAssembly(migrationsAssembly)));
         }
 
         public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
         {
             app.UseDeveloperExceptionPage();
-
+            InitializeDatabase(app);
             app.UseIdentityServer();
 
             app.UseGoogleAuthentication(new GoogleOptions
@@ -44,6 +51,46 @@ namespace StartIdentity
 
             app.UseStaticFiles();
             app.UseMvcWithDefaultRoute();
+        }
+        public Startup(ILoggerFactory loggerFactory)
+        {
+            loggerFactory.AddConsole(LogLevel.Debug);
+        }
+        private void InitializeDatabase(IApplicationBuilder app)
+        {
+            using (var serviceScope = app.ApplicationServices.GetService<IServiceScopeFactory>().CreateScope())
+            {
+                serviceScope.ServiceProvider.GetRequiredService<PersistedGrantDbContext>().Database.Migrate();
+
+                var context = serviceScope.ServiceProvider.GetRequiredService<ConfigurationDbContext>();
+                context.Database.Migrate();
+                if (!context.Clients.Any())
+                {
+                    foreach (var client in Config.GetClients())
+                    {
+                        context.Clients.Add(client.ToEntity());
+                    }
+                    context.SaveChanges();
+                }
+
+                if (!context.IdentityResources.Any())
+                {
+                    foreach (var resource in Config.GetIdentityResources())
+                    {
+                        context.IdentityResources.Add(resource.ToEntity());
+                    }
+                    context.SaveChanges();
+                }
+
+                if (!context.ApiResources.Any())
+                {
+                    foreach (var resource in Config.GetApiResources())
+                    {
+                        context.ApiResources.Add(resource.ToEntity());
+                    }
+                    context.SaveChanges();
+                }
+            }
         }
     }
 }
